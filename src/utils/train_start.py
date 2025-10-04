@@ -1,25 +1,23 @@
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import mean_squared_error, accuracy_score
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-
 from src.utils.loader import Data
-from src.models.impl import Model
+from src.models.impl import MultiStepReturnModel  # новая модель
 
 class Train:
-    def __init__(self, data_path: str, device=None, lr=0.0001, epochs=50):
+    def __init__(self, data_path: str, device=None, lr=0.001, epochs=50):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = Model(34).to(self.device)
+        self.model = MultiStepReturnModel(input_size=33, output_size=20).to(self.device)
         self.data = Data(path=data_path)
-        self.train_loader, self.val_loader = self.data.get_loader(seq_len=10, batch_size=16)
+        self.train_loader, self.val_loader = self.data.get_loader(seq_len=20, batch_size=16)
 
-        self.criterion_reg = nn.MSELoss()
-        self.criterion_clf = nn.BCELoss()
+        self.criterion = nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-4)
         self.epochs = epochs
-        self.writer = SummaryWriter("src/data/TB_log")
+
 
     def _save_model(self, epoch):
         torch.save(self.model.state_dict(), f"models/{epoch}.pth")
@@ -27,15 +25,15 @@ class Train:
     def fit(self):
         for epoch in range(self.epochs):
             train_loss = self._train_epoch()
-            val_loss, accuracy = self._validate_epoch()
+            val_loss, val_rmse, val_acc = self._validate_epoch()
             print(f"Epoch [{epoch+1}/{self.epochs}] | "
                   f"Train loss: {train_loss:.6f} | "
                   f"Val loss: {val_loss:.6f} | "
-                  f"Accuracy: {accuracy:.6f}")
-            self.writer.add_scalar("accuracy/epoch", accuracy, epoch)
-            self.writer.add_scalar("val_loss/epoch", val_loss, epoch)
+                  f"Val RMSE: {val_rmse:.6f} | "
+                  f"Val Accuracy: {val_acc:.4f}")
 
-        self.writer.close()
+            self._save_model(epoch)
+
 
     def _train_epoch(self):
         self.model.train()
@@ -43,25 +41,10 @@ class Train:
         for X_batch, Y_batch in self.train_loader:
             X_batch, Y_batch = X_batch.to(self.device), Y_batch.to(self.device)
 
-            preds = self.model(X_batch)  # [batch, seq_len, 4]
+            preds = self.model(X_batch)  # [batch, 20]
+            Y_batch = Y_batch[:, -20:, 0]  # [batch, 20]
 
-            r1d_pred = preds[:, :, 0]
-            d1d_pred = preds[:, :, 1]
-            r20d_pred = preds[:, :, 2]
-            d20d_pred = preds[:, :, 3]
-
-            r1d_true = Y_batch[:, :, 0]
-            d1d_true = Y_batch[:, :, 1]
-            r20d_true = Y_batch[:, :, 2]
-            d20d_true = Y_batch[:, :, 3]
-
-            loss_return_1d = self.criterion_reg(r1d_pred, r1d_true)
-            loss_direction_1d = self.criterion_clf(d1d_pred, d1d_true)
-            loss_return_20d = self.criterion_reg(r20d_pred, r20d_true)
-            loss_direction_20d = self.criterion_clf(d20d_pred, d20d_true)
-
-            loss = (loss_return_1d + loss_direction_1d + loss_return_20d + loss_direction_20d) / 4
-
+            loss = self.criterion(preds, Y_batch)
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
@@ -73,40 +56,26 @@ class Train:
         self.model.eval()
         total_loss = 0
         all_true, all_pred = [], []
+        all_true_dir, all_pred_dir = [], []
 
         with torch.no_grad():
             for X_batch, Y_batch in self.val_loader:
                 X_batch, Y_batch = X_batch.to(self.device), Y_batch.to(self.device)
-                preds = self.model(X_batch)  # [batch, seq_len, 4]
+                preds = self.model(X_batch)  # [batch, 20]
+                Y_batch = Y_batch[:, -20:, 0]  # [batch, 20]
 
-                r1d_pred = preds[:, :, 0]
-                d1d_pred = preds[:, :, 1]
-                r20d_pred = preds[:, :, 2]
-                d20d_pred = preds[:, :, 3]
-
-                r1d_true = Y_batch[:, :, 0]
-                d1d_true = Y_batch[:, :, 1]
-                r20d_true = Y_batch[:, :, 2]
-                d20d_true = Y_batch[:, :, 3]
-
-                loss_return_1d = self.criterion_reg(r1d_pred, r1d_true)
-                # print(d1d_pred, d1d_true)
-                loss_direction_1d = self.criterion_clf(d1d_pred, d1d_true)
-                loss_return_20d = self.criterion_reg(r20d_pred, r20d_true)
-                loss_direction_20d = self.criterion_clf(d20d_pred, d20d_true)
-
-                loss = (loss_return_1d + loss_direction_1d + loss_return_20d + loss_direction_20d) / 4
+                loss = self.criterion(preds, Y_batch)
                 total_loss += loss.item()
 
-                # Для accuracy бинарной классификации
-                preds_bin_1d = (d1d_pred > 0.5).int().cpu().numpy().flatten()
-                preds_bin_20d = (d20d_pred > 0.5).int().cpu().numpy().flatten()
-                true_bin_1d = d1d_true.int().cpu().numpy().flatten()
-                true_bin_20d = d20d_true.int().cpu().numpy().flatten()
+                # для RMSE
+                all_true.extend(Y_batch.cpu().numpy().flatten())
+                all_pred.extend(preds.cpu().numpy().flatten())
 
-                all_true.extend(list(true_bin_1d) + list(true_bin_20d))
-                all_pred.extend(list(preds_bin_1d) + list(preds_bin_20d))
+                # для Accuracy направления
+                all_true_dir.extend((Y_batch > 0).cpu().numpy().flatten())
+                all_pred_dir.extend((preds > 0).cpu().numpy().flatten())
 
-        accuracy = accuracy_score(all_true, all_pred)
+        val_rmse = mean_squared_error(all_true, all_pred)  # RMSE
+        val_acc = accuracy_score(all_true_dir, all_pred_dir)
 
-        return total_loss / len(self.val_loader), accuracy
+        return total_loss / len(self.val_loader), val_rmse, val_acc
