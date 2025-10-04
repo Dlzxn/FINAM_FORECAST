@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+from typing import Any
+
 
 class DataContract(ABC):
     @abstractmethod
@@ -9,4 +11,10 @@ class DataContract(ABC):
         pass
 
     def _save_data(self) -> None:
+        pass
+
+    def _reset_data(self) -> None:
+        pass
+
+    def get_loader(self) -> tuple[Any, Any]:
         pass

@@ -8,16 +8,28 @@ from torch.utils.data import Dataset, DataLoader
 from src.contracts.data_contract import DataContract
 
 
+import torch
+from torch.utils.data import Dataset
+
 class TorchDataset(Dataset):
-    def __init__(self, X, Y):
+    def __init__(self, X, Y, seq_len=5):
+        """
+        X — DataFrame или np.array с признаками
+        Y — Series или np.array с целями
+        seq_len — длина временного окна (кол-во шагов в ряду)
+        """
         self.X = torch.tensor(X.values, dtype=torch.float32)
         self.Y = torch.tensor(Y.values, dtype=torch.float32)
+        self.seq_len = seq_len
 
     def __len__(self):
-        return len(self.X)
+        return len(self.X) - self.seq_len
 
     def __getitem__(self, idx):
-        return self.X[idx], self.Y[idx]
+        x_seq = self.X[idx : idx + self.seq_len]
+        y_target = self.Y[idx + self.seq_len]
+        return x_seq, y_target
+
 
 
 class Data(DataContract):
@@ -59,8 +71,8 @@ class Data(DataContract):
         train_dataset = TorchDataset(X_train, Y_train)
         val_dataset = TorchDataset(X_val, Y_val)
 
-        self.train_loader = DataLoader(train_dataset, batch_size=32, shuffle=False)
-        self.val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+        self.train_loader = DataLoader(train_dataset, batch_size=16, shuffle=False)
+        self.val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
     def get_loader(self):
         self._load_data()
